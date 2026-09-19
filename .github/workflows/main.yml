@@ -25,4 +25,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/myimagedocker:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/myimagedocker:latest
