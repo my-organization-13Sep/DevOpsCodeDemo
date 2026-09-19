@@ -1,0 +1,102 @@
+name: Build and publish addressbook
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      # Fetch the application source, tests, and dockerfile.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # Install Temurin 17 and cache dependencies for the runner's Maven.
+      - name: Set up Java and Maven cache
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Run unit tests and package target/addressbook.war.
+      - name: Build Java WAR
+        run: |
+          mvn clean package
+          test -f target/addressbook.war
+
+      # Initialize the BuildKit builder used to build the image.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Authenticate using repository secrets; never hardcode credentials.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Use the local context so the Maven-generated WAR is included.
+      # v7 replaces v5's deprecated Node 20 runtime.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/addressbook:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/addressbook:${{ github.sha }}
+
+      # Optional Gmail notification on success or failure. Configure these
+      # three additional secrets to enable it; a local browser login cannot
+      # authenticate a GitHub-hosted runner. Use a Gmail app password.
+      - name: Email workflow result
+        if: ${{ always() }}
+        env:
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          JOB_STATUS: ${{ job.status }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: >-
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import smtplib
+          import ssl
+          from email.message import EmailMessage
+
+          env = os.environ
+          keys = ('GMAIL_USERNAME', 'GMAIL_APP_PASSWORD', 'NOTIFICATION_EMAIL')
+          if not all(env.get(key) for key in keys):
+              print('Email skipped: configure all three notification secrets.')
+              raise SystemExit(0)
+
+          message = EmailMessage()
+          message['From'] = env['GMAIL_USERNAME']
+          message['To'] = env['NOTIFICATION_EMAIL']
+          message['Subject'] = (
+              f"{env['REPOSITORY']} [{env['BRANCH']}] {env['JOB_STATUS']}"
+          )
+          message.set_content(
+              f"Commit SHA: {env['COMMIT_SHA']}\n"
+              f"Actor: {env['ACTOR']}\n"
+              f"Workflow run: {env['RUN_URL']}\n"
+          )
+          with smtplib.SMTP_SSL(
+              'smtp.gmail.com', 465, context=ssl.create_default_context(),
+              timeout=30,
+          ) as smtp:
+              smtp.login(env['GMAIL_USERNAME'], env['GMAIL_APP_PASSWORD'])
+              smtp.send_message(message)
+          PY
